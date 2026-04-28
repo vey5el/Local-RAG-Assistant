@@ -8,7 +8,7 @@ A fully local, ChatGPT-style question-answering system that answers questions ab
 
 ## Demo Video
 
-🎥 [Insert your Loom/YouTube link here]
+🎥 video link will be added
 
 ---
 
@@ -43,8 +43,8 @@ User Query → Classifier → Retriever → Prompt Builder → Ollama LLM → An
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/wikirag.git
-cd wikirag
+git clone https://github.com/vey5el/Local-RAG-Assistant
+cd Local-RAG-Assistant
 ```
 
 ### 2. Create a virtual environment
