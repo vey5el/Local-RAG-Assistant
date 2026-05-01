@@ -1,2 +1,4 @@
 venv/
 chroma_db/
+data/__pycache__/
+lib/__pycache__/
