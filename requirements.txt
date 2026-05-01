@@ -1,0 +1,18 @@
+# WikiRAG dependencies
+# Install with: pip install -r requirements.txt
+
+# Core
+requests>=2.31.0
+chromadb>=0.4.24
+
+# UI
+streamlit>=1.32.0
+
+# Ollama Python client (optional, used for model management checks)
+ollama>=0.1.7
+
+# Fallback embedder (only needed if Ollama is unavailable)
+sentence-transformers>=2.6.0
+
+# Utilities
+tqdm>=4.66.0
