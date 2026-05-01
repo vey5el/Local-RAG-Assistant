@@ -1,191 +1,212 @@
 # app.py
-"""Streamlit web UI for WikiRAG — profile-aware chat interface."""
+"""
+Streamlit UI — three independent selectors:
+  • Chunk profile  (tiny / small / medium / large / xl)
+  • Embedder       (minilm / nomic)
+  • LLM            (llama3 / phi3 / mistral)
+"""
 
 import streamlit as st
 
-from lib import embedder as emb_module, store, retriever, generator
-from lib.store import get_client, ingested_profiles, collection_stats
-from lib.config import CHUNK_PROFILES, DEFAULT_PROFILE, PROFILE_ORDER
+from lib import retriever, generator
+from lib.embedder import get_embedder
+from lib.store import get_client, collection_stats, ingested_combinations
+from lib.config import (
+    CHUNK_PROFILES, PROFILE_ORDER, DEFAULT_PROFILE,
+    EMBEDDER_CONFIGS, EMBEDDER_ORDER, DEFAULT_EMBEDDER,
+    LLM_CONFIGS, LLM_ORDER, DEFAULT_LLM,
+)
 
-# ── Page setup ───────────────────────────────────────────────────────────────
+# ── Page ──────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="WikiRAG", page_icon="📚", layout="centered")
-
 st.markdown("""
 <style>
-    .source-box {
-        background: #f5f5f5;
-        border-left: 3px solid #aaa;
-        padding: 8px 12px;
-        margin: 4px 0;
-        border-radius: 4px;
-        font-size: 0.84em;
-        line-height: 1.5;
-    }
-    .tag {
-        display: inline-block;
-        background: #dbeafe;
-        color: #1d4ed8;
-        border-radius: 4px;
-        padding: 1px 7px;
-        font-size: 0.76em;
-        font-weight: 700;
-        margin-right: 6px;
-    }
-    .profile-pill {
-        display: inline-block;
-        background: #fef9c3;
-        color: #713f12;
-        border-radius: 4px;
-        padding: 1px 7px;
-        font-size: 0.76em;
-        font-weight: 700;
-    }
-    .dist-badge {
-        display: inline-block;
-        background: #f0fdf4;
-        color: #166534;
-        border-radius: 4px;
-        padding: 1px 7px;
-        font-size: 0.76em;
-    }
+.source-box {
+    background:#f8f9fa; border-left:3px solid #ced4da;
+    padding:8px 12px; margin:6px 0; border-radius:4px; font-size:.84em;
+}
+.badge {
+    display:inline-block; border-radius:4px;
+    padding:1px 8px; font-size:.74em; font-weight:700; margin-right:4px;
+}
+.b-title   { background:#dbeafe; color:#1d4ed8; }
+.b-profile { background:#fef9c3; color:#854d0e; }
+.b-embed   { background:#dcfce7; color:#166534; }
+.b-dist    { background:#f3f4f6; color:#374151; }
 </style>
 """, unsafe_allow_html=True)
 
-# ── Session state ────────────────────────────────────────────────────────────
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-if "selected_profile" not in st.session_state:
-    st.session_state.selected_profile = DEFAULT_PROFILE
+# ── Session defaults ──────────────────────────────────────────────────────────
+DEFAULTS = {
+    "messages":        [],
+    "active_profile":  DEFAULT_PROFILE,
+    "active_embedder": DEFAULT_EMBEDDER,
+    "active_llm":      DEFAULT_LLM,
+}
+for k, v in DEFAULTS.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
 
-# ── Load resources (cached across reruns) ───────────────────────────────────
-@st.cache_resource(show_spinner="Loading local models…")
-def load_resources():
-    embedder = emb_module.get_embedder()
-    client   = get_client()
-    return embedder, client
+# ── Cached resources ──────────────────────────────────────────────────────────
+@st.cache_resource(show_spinner="Connecting to ChromaDB…")
+def load_client():
+    return get_client()
 
-try:
-    embedder, client = load_resources()
-except Exception as e:
-    st.error(
-        f"Could not connect to Ollama: {e}\n\n"
-        "Make sure Ollama is running:  `ollama serve`"
-    )
-    st.stop()
+@st.cache_resource(show_spinner="Loading embedding model…")
+def load_embedder(key: str):
+    return get_embedder(key)
 
-# ── Sidebar ──────────────────────────────────────────────────────────────────
+client = load_client()
+combos = ingested_combinations(client)
+stats  = collection_stats(client)
+
+# ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.title("⚙️ WikiRAG")
-    st.caption("Local Wikipedia Q&A — no external APIs.")
+    st.caption("Local Q&A · No external APIs")
     st.divider()
 
-    # ── Profile selector ─────────────────────────────────────────
-    st.subheader("🗂 Chunk Profile")
-
-    available = ingested_profiles(client)
-
-    if not available:
-        st.warning(
-            "No data ingested yet.\n\n"
-            "Run one of:\n"
-            "```\npython ingest.py\n"
-            "python ingest.py --all\n```"
-        )
+    if not combos:
+        st.error("Nothing ingested yet.\n\n```\npython ingest.py --all\n```")
         st.stop()
 
-    # Build dropdown options in canonical order
-    ordered_available = [p for p in PROFILE_ORDER if p in available]
+    avail_profiles  = sorted({c["profile"]  for c in combos}, key=PROFILE_ORDER.index)
+    avail_embedders = sorted({c["embedder"] for c in combos}, key=EMBEDDER_ORDER.index)
 
-    def profile_label(name):
-        p = CHUNK_PROFILES[name]
-        tag = " ★" if name == DEFAULT_PROFILE else ""
-        return f"{name.upper()}{tag}  —  {p.chunk_size} chars / {p.overlap} overlap"
+    # ── 1. Chunk profile ──────────────────────────────────────
+    st.subheader("🗂 Chunk Profile")
+    new_profile = st.selectbox(
+        "label_profile", label_visibility="collapsed",
+        options=avail_profiles,
+        format_func=lambda n: (
+            f"{'★ ' if n == DEFAULT_PROFILE else ''}"
+            f"{n.upper()}  —  "
+            f"{CHUNK_PROFILES[n].chunk_size} chars / {CHUNK_PROFILES[n].overlap} overlap"
+        ),
+        index=avail_profiles.index(st.session_state.active_profile)
+              if st.session_state.active_profile in avail_profiles else 0,
+    )
+    st.caption(CHUNK_PROFILES[new_profile].description)
 
-    selected = st.selectbox(
-        "Active profile",
-        options=ordered_available,
-        format_func=profile_label,
-        index=ordered_available.index(st.session_state.selected_profile)
-              if st.session_state.selected_profile in ordered_available
-              else 0,
+    # ── 2. Embedder ───────────────────────────────────────────
+    st.subheader("🧠 Embedding Model")
+
+    avail_for_profile = sorted(
+        {c["embedder"] for c in combos if c["profile"] == new_profile},
+        key=EMBEDDER_ORDER.index,
+    )
+    if not avail_for_profile:
+        st.warning(f"No embedders ingested for profile '{new_profile}'.")
+        st.stop()
+
+    cur_emb_idx = (
+        avail_for_profile.index(st.session_state.active_embedder)
+        if st.session_state.active_embedder in avail_for_profile else 0
+    )
+    new_embedder = st.selectbox(
+        "label_embedder", label_visibility="collapsed",
+        options=avail_for_profile,
+        format_func=lambda k: (
+            f"{'★ ' if k == DEFAULT_EMBEDDER else ''}"
+            f"{EMBEDDER_CONFIGS[k].description}"
+        ),
+        index=cur_emb_idx,
     )
 
-    if selected != st.session_state.selected_profile:
-        st.session_state.selected_profile = selected
-        st.session_state.messages = []   # clear chat when switching profile
+    # ── 3. LLM ───────────────────────────────────────────────
+    st.subheader("🤖 Language Model")
+    new_llm = st.selectbox(
+        "label_llm", label_visibility="collapsed",
+        options=LLM_ORDER,
+        format_func=lambda k: (
+            f"{'★ ' if k == DEFAULT_LLM else ''}"
+            f"{LLM_CONFIGS[k].description}"
+        ),
+        index=LLM_ORDER.index(st.session_state.active_llm)
+              if st.session_state.active_llm in LLM_ORDER else 0,
+    )
+
+    # Apply changes — clear chat if retrieval settings changed
+    retrieval_changed = (
+        new_profile  != st.session_state.active_profile or
+        new_embedder != st.session_state.active_embedder
+    )
+    st.session_state.active_profile  = new_profile
+    st.session_state.active_embedder = new_embedder
+    st.session_state.active_llm      = new_llm
+    if retrieval_changed:
+        st.session_state.messages = []
         st.rerun()
 
-    active_profile = st.session_state.selected_profile
-    prof = CHUNK_PROFILES[active_profile]
-    st.caption(prof.description)
+    active_profile  = st.session_state.active_profile
+    active_embedder = st.session_state.active_embedder
+    active_llm      = st.session_state.active_llm
 
-    # ── Not-yet-ingested profiles ────────────────────────────────
-    missing = [p for p in PROFILE_ORDER if p not in available]
+    # ── Stats ─────────────────────────────────────────────────
+    st.divider()
+    st.subheader("📊 Ingested combinations")
+    for p in avail_profiles:
+        for e in EMBEDDER_ORDER:
+            s = stats.get(p, {}).get(e)
+            if not s:
+                continue
+            active_marker = " ◀" if p == active_profile and e == active_embedder else ""
+            st.markdown(
+                f"`{p}/{e}`{active_marker}  👤 {s['people']} / 📍 {s['places']}"
+            )
+
+    missing = [
+        f"`{p}/{e}`"
+        for p in PROFILE_ORDER for e in EMBEDDER_ORDER
+        if not stats.get(p, {}).get(e)
+    ]
     if missing:
-        st.info(
-            "Profiles not yet ingested:\n" +
-            "\n".join(f"• `{m}`" for m in missing) +
-            "\n\nIngest them with:\n```\npython ingest.py --profile <name>\n```"
-        )
+        with st.expander(f"Not ingested ({len(missing)})"):
+            st.caption("  ".join(missing))
+            st.caption("Run: `python ingest.py --all`")
 
     st.divider()
-
-    # ── Stats ────────────────────────────────────────────────────
-    st.subheader("📊 Collection stats")
-    stats = collection_stats(client)
-    for name in ordered_available:
-        s = stats.get(name, {})
-        active_marker = " ◀" if name == active_profile else ""
-        st.markdown(
-            f"**{name.upper()}**{active_marker}  "
-            f"`👤 {s.get('people', 0)}` / `📍 {s.get('places', 0)}` chunks"
-        )
-
-    st.divider()
-
-    # ── Options ──────────────────────────────────────────────────
-    show_sources = st.toggle("Show retrieved sources", value=False)
-
+    show_sources = st.toggle("Show source chunks", value=False)
     if st.button("🗑️ Clear conversation"):
         st.session_state.messages = []
         st.rerun()
 
-    st.divider()
-    st.caption("LLM : llama3.2:3b via Ollama")
-    st.caption("Embeddings : sentence-transformers / nomic-embed-text")
 
-# ── Header ───────────────────────────────────────────────────────────────────
+# ── Header ────────────────────────────────────────────────────────────────────
 st.title("📚 WikiRAG")
+prof = CHUNK_PROFILES[active_profile]
+emb  = EMBEDDER_CONFIGS[active_embedder]
+llm  = LLM_CONFIGS[active_llm]
 st.caption(
-    f"Active profile: **{active_profile.upper()}** "
-    f"({prof.chunk_size} chars / {prof.overlap} overlap)"
+    f"**Chunks:** {active_profile} ({prof.chunk_size}/{prof.overlap})  ·  "
+    f"**Embed:** {active_embedder} ({emb.dimension}-dim)  ·  "
+    f"**LLM:** {llm.model_name}"
 )
 
-# ── Chat history ─────────────────────────────────────────────────────────────
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
 
-        if (
-            msg["role"] == "assistant"
-            and show_sources
-            and msg.get("sources")
-        ):
-            _render_sources(msg["sources"], msg.get("profile", active_profile))
-
-# helper rendered after history loop definition
-def _render_sources(chunks, profile_name):
+# ── Source renderer ───────────────────────────────────────────────────────────
+def render_sources(chunks, profile, emb_key):
     with st.expander(f"📄 {len(chunks)} source chunk(s) used"):
-        for i, chunk in enumerate(chunks, 1):
+        for c in chunks:
             st.markdown(
                 f'<div class="source-box">'
-                f'<span class="tag">{chunk["title"]}</span>'
-                f'<span class="profile-pill">{profile_name}</span>'
-                f'<span class="dist-badge">dist {chunk["distance"]:.3f}</span><br><br>'
-                f'{chunk["text"][:350]}{"…" if len(chunk["text"]) > 350 else ""}'
+                f'<span class="badge b-title">{c["title"]}</span>'
+                f'<span class="badge b-profile">{profile}</span>'
+                f'<span class="badge b-embed">{emb_key}</span>'
+                f'<span class="badge b-dist">dist {c["distance"]:.3f}</span>'
+                f'<br><br>{c["text"][:350]}{"…" if len(c["text"]) > 350 else ""}'
                 f'</div>',
                 unsafe_allow_html=True,
             )
+
+
+# ── Chat history ──────────────────────────────────────────────────────────────
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+        if msg["role"] == "assistant" and show_sources and msg.get("sources"):
+            render_sources(msg["sources"], msg.get("profile"), msg.get("embedder"))
+
 
 # ── Input ─────────────────────────────────────────────────────────────────────
 if prompt := st.chat_input("Ask about a famous person or place…"):
@@ -194,38 +215,42 @@ if prompt := st.chat_input("Ask about a famous person or place…"):
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        # Retrieve
-        with st.spinner(f"Searching '{active_profile}' profile…"):
+        embedder_instance = load_embedder(active_embedder)
+
+        with st.spinner(f"Searching [{active_profile} · {active_embedder}]…"):
             result = retriever.retrieve(
                 prompt,
-                profile_name=active_profile,
-                embedder=embedder,
-                client=client,
+                profile_name = active_profile,
+                embedder_key = active_embedder,
+                embedder     = embedder_instance,
+                client       = client,
             )
 
-        type_label = {
-            "person": "👤 people",
-            "place":  "📍 places",
-            "both":   "👤📍 people & places",
-        }.get(result["query_type"], result["query_type"])
+        type_icon = {"person": "👤", "place": "📍", "both": "👤📍"}.get(result["query_type"], "")
+        st.caption(
+            f"{type_icon} searched {result['query_type']}  ·  "
+            f"profile: **{active_profile}**  ·  "
+            f"embed: **{active_embedder}**  ·  "
+            f"llm: **{active_llm}**"
+        )
 
-        st.caption(f"Searched: {type_label}  |  Profile: **{active_profile}**")
-
-        # Generate
         if not result["found"]:
             answer = "I don't know based on the available information."
             st.markdown(answer)
         else:
-            with st.spinner("Generating answer…"):
-                answer = generator.generate_answer(prompt, result["chunks"])
+            with st.spinner(f"Generating with {llm.model_name}…"):
+                answer = generator.generate_answer(
+                    prompt, result["chunks"], llm_key=active_llm
+                )
             st.markdown(answer)
-
             if show_sources and result["chunks"]:
-                _render_sources(result["chunks"], active_profile)
+                render_sources(result["chunks"], active_profile, active_embedder)
 
     st.session_state.messages.append({
-        "role":    "assistant",
-        "content": answer,
-        "sources": result.get("chunks", []),
-        "profile": active_profile,
+        "role":     "assistant",
+        "content":  answer,
+        "sources":  result.get("chunks", []),
+        "profile":  active_profile,
+        "embedder": active_embedder,
+        "llm":      active_llm,
     })

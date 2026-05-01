@@ -1,11 +1,8 @@
-# wikirag/store.py
-"""ChromaDB vector store operations.
+# lib/store.py
+"""ChromaDB operations.
 
-Collections are named:  {entity_type}_{profile_name}
-e.g.  people_medium,  places_small,  people_large
-
-This allows multiple chunk configurations to coexist in the same
-ChromaDB instance without any conflicts.
+Collection naming: {people|places}_{chunk_profile}_{embedder_key}
+LLM is NOT part of collection names — switching LLM needs no re-ingestion.
 """
 
 import uuid
@@ -13,8 +10,9 @@ import chromadb
 from typing import List, Dict, Any
 
 from lib.config import (
-    CHROMA_DIR, TOP_K, DEFAULT_PROFILE,
-    collection_name, get_profile, CHUNK_PROFILES,
+    CHROMA_DIR, TOP_K, DEFAULT_PROFILE, DEFAULT_EMBEDDER,
+    PROFILE_ORDER, EMBEDDER_ORDER,
+    collection_name,
 )
 
 
@@ -22,66 +20,55 @@ def get_client() -> chromadb.PersistentClient:
     return chromadb.PersistentClient(path=CHROMA_DIR)
 
 
-def get_collection(client: chromadb.PersistentClient, name: str):
+def _coll(client, entity_type: str, profile_name: str, embedder_key: str):
     return client.get_or_create_collection(
-        name=name,
+        name=collection_name(entity_type, profile_name, embedder_key),
         metadata={"hnsw:space": "cosine"},
     )
 
 
-def _coll(client, entity_type: str, profile_name: str):
-    """Shorthand to get the collection for a given type + profile."""
-    return get_collection(client, collection_name(entity_type, profile_name))
+# ── Write ─────────────────────────────────────────────────────────────────────
 
-
-def chunks_already_indexed(
-    client: chromadb.PersistentClient,
-    title: str,
-    entity_type: str,
-    profile_name: str,
-) -> bool:
-    coll = _coll(client, entity_type, profile_name)
-    results = coll.get(where={"title": title}, limit=1)
+def chunks_already_indexed(client, title, entity_type, profile_name, embedder_key) -> bool:
+    results = _coll(client, entity_type, profile_name, embedder_key).get(
+        where={"title": title}, limit=1
+    )
     return len(results["ids"]) > 0
 
 
-def add_chunks(
-    client: chromadb.PersistentClient,
-    chunks: List[Dict[str, Any]],
-    embeddings: List[List[float]],
-    profile_name: str,
-):
+def add_chunks(client, chunks: List[Dict], embeddings: List[List[float]],
+               profile_name: str, embedder_key: str):
     if not chunks:
         return
-
     entity_type = chunks[0]["entity_type"]
-    coll = _coll(client, entity_type, profile_name)
+    coll = _coll(client, entity_type, profile_name, embedder_key)
+    coll.add(
+        ids       = [str(uuid.uuid4()) for _ in chunks],
+        embeddings= embeddings,
+        documents = [c["text"] for c in chunks],
+        metadatas = [
+            {
+                "title":       c["title"],
+                "entity_type": c["entity_type"],
+                "chunk_index": c["chunk_index"],
+                "url":         c.get("url", ""),
+                "profile":     profile_name,
+                "embedder":    embedder_key,
+            }
+            for c in chunks
+        ],
+    )
 
-    ids = [str(uuid.uuid4()) for _ in chunks]
-    documents = [c["text"] for c in chunks]
-    metadatas = [
-        {
-            "title": c["title"],
-            "entity_type": c["entity_type"],
-            "chunk_index": c["chunk_index"],
-            "url": c.get("url", ""),
-            "profile": profile_name,
-        }
-        for c in chunks
-    ]
 
-    coll.add(ids=ids, embeddings=embeddings, documents=documents, metadatas=metadatas)
-
+# ── Read ──────────────────────────────────────────────────────────────────────
 
 def query_collection(
-    client: chromadb.PersistentClient,
-    entity_type: str,
-    query_embedding: List[float],
+    client, entity_type: str, query_embedding: List[float],
     profile_name: str = DEFAULT_PROFILE,
+    embedder_key: str = DEFAULT_EMBEDDER,
     top_k: int = TOP_K,
-) -> List[Dict[str, Any]]:
-    coll = _coll(client, entity_type, profile_name)
-
+) -> List[Dict]:
+    coll = _coll(client, entity_type, profile_name, embedder_key)
     if coll.count() == 0:
         return []
 
@@ -91,71 +78,65 @@ def query_collection(
         include=["documents", "metadatas", "distances"],
     )
 
-    hits = []
-    for doc, meta, dist in zip(
-        results["documents"][0],
-        results["metadatas"][0],
-        results["distances"][0],
-    ):
-        hits.append({
-            "text": doc,
-            "title": meta.get("title", ""),
+    return [
+        {
+            "text":        doc,
+            "title":       meta.get("title", ""),
             "entity_type": meta.get("entity_type", ""),
             "chunk_index": meta.get("chunk_index", 0),
-            "url": meta.get("url", ""),
-            "profile": meta.get("profile", profile_name),
-            "distance": dist,
-        })
+            "url":         meta.get("url", ""),
+            "profile":     meta.get("profile", profile_name),
+            "embedder":    meta.get("embedder", embedder_key),
+            "distance":    dist,
+        }
+        for doc, meta, dist in zip(
+            results["documents"][0],
+            results["metadatas"][0],
+            results["distances"][0],
+        )
+    ]
 
-    return hits
 
+# ── Management ────────────────────────────────────────────────────────────────
 
-def reset_profile(client: chromadb.PersistentClient, profile_name: str):
-    """Delete and recreate both collections for a specific profile."""
+def reset_combination(client, profile_name: str, embedder_key: str):
     for entity_type in ["person", "place"]:
-        name = collection_name(entity_type, profile_name)
+        name = collection_name(entity_type, profile_name, embedder_key)
         try:
             client.delete_collection(name)
         except Exception:
             pass
         client.get_or_create_collection(name, metadata={"hnsw:space": "cosine"})
-    print(f"[store] Reset collections for profile '{profile_name}'.")
+    print(f"[store] Reset: {profile_name}/{embedder_key}")
 
 
-def reset_all(client: chromadb.PersistentClient):
-    """Delete ALL collections across all profiles."""
+def reset_all(client):
     existing = [c.name for c in client.list_collections()]
     for name in existing:
         client.delete_collection(name)
     print(f"[store] Deleted {len(existing)} collections.")
 
 
-def collection_stats(client: chromadb.PersistentClient) -> Dict[str, Dict[str, int]]:
+def collection_stats(client) -> Dict[str, Dict[str, Dict[str, int]]]:
     """
-    Return chunk counts grouped by profile.
-
     Returns:
-        {
-          "medium": {"people": 847, "places": 634},
-          "small":  {"people": 1820, "places": 1340},
-          ...
-        }
+        { profile_name: { embedder_key: { "people": N, "places": N } } }
+    Only includes combinations that have at least one chunk.
     """
     stats = {}
-    for profile_name in CHUNK_PROFILES:
-        people_coll = _coll(client, "person", profile_name)
-        places_coll = _coll(client, "place", profile_name)
-        people_count = people_coll.count()
-        places_count = places_coll.count()
-        if people_count > 0 or places_count > 0:
-            stats[profile_name] = {
-                "people": people_count,
-                "places": places_count,
-            }
+    for profile in PROFILE_ORDER:
+        for emb in EMBEDDER_ORDER:
+            pc  = _coll(client, "person", profile, emb).count()
+            plc = _coll(client, "place",  profile, emb).count()
+            if pc > 0 or plc > 0:
+                stats.setdefault(profile, {})[emb] = {"people": pc, "places": plc}
     return stats
 
 
-def ingested_profiles(client: chromadb.PersistentClient) -> List[str]:
-    """Return list of profile names that have been ingested (non-empty collections)."""
-    stats = collection_stats(client)
-    return list(stats.keys())
+def ingested_combinations(client) -> List[Dict[str, str]]:
+    """Return list of {profile, embedder} dicts that are ready to query."""
+    combos = []
+    for profile, embedders in collection_stats(client).items():
+        for emb in embedders:
+            combos.append({"profile": profile, "embedder": emb})
+    return combos
