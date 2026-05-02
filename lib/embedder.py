@@ -1,48 +1,52 @@
 # lib/embedder.py
 """
 Two embedding backends:
-  minilm — all-MiniLM-L6-v2 via sentence-transformers (no Ollama needed)
-  nomic  — nomic-embed-text via Ollama (requires: ollama serve + ollama pull nomic-embed-text)
-
-Interface for both:
-  embedder.embed(text)        → List[float]
-  embedder.embed_batch(texts) → List[List[float]]
+  minilm — sentence-transformers (auto-detects CUDA > CPU)
+  nomic  — nomic-embed-text via Ollama
 """
 
 import os
 import multiprocessing
 import requests
+import torch
+from typing import List
+from lib.config import OLLAMA_BASE_URL, EmbedderConfig, get_embedder_config, DEFAULT_EMBEDDER
 
-# ── CPU thread optimization ───────────────────────────────────────────────────
-# By default PyTorch / sentence-transformers only uses 1-2 threads.
-# These variables tell OpenBLAS/MKL/OpenMP to use all available cores.
+# ── CPU thread optimization (only matters when running on CPU) ────────────────
 _N = str(multiprocessing.cpu_count())
 os.environ.setdefault("OMP_NUM_THREADS",        _N)
 os.environ.setdefault("MKL_NUM_THREADS",        _N)
 os.environ.setdefault("OPENBLAS_NUM_THREADS",   _N)
 os.environ.setdefault("VECLIB_MAXIMUM_THREADS", _N)
 os.environ.setdefault("NUMEXPR_NUM_THREADS",    _N)
-
-import torch
 torch.set_num_threads(multiprocessing.cpu_count())
-from typing import List
-from lib.config import OLLAMA_BASE_URL, EmbedderConfig, get_embedder_config, DEFAULT_EMBEDDER
+
+
+def _best_device() -> str:
+    """Return 'cuda' if a CUDA GPU is available, otherwise 'cpu'."""
+    if torch.cuda.is_available():
+        gpu = torch.cuda.get_device_name(0)
+        print(f"[embedder] CUDA GPU detected: {gpu}")
+        return "cuda"
+    print("[embedder] No CUDA GPU — using CPU")
+    return "cpu"
 
 
 class SentenceTransformerEmbedder:
-    """sentence-transformers backend. Works on CPU; uses DirectML on AMD GPU
-    automatically if onnxruntime-directml is installed."""
+    """sentence-transformers backend.
+    Automatically uses CUDA (NVIDIA) if available, otherwise CPU.
+    """
 
     def __init__(self, cfg: EmbedderConfig):
         try:
             from sentence_transformers import SentenceTransformer
         except ImportError:
-            raise ImportError(
-                "Run: pip install sentence-transformers"
-            )
-        self.cfg   = cfg
-        self.model = SentenceTransformer(cfg.model_name)
-        print(f"[embedder] {cfg.key} ({cfg.model_name} · {cfg.dimension}-dim · sentence-transformers)")
+            raise ImportError("Run: pip install sentence-transformers")
+
+        self.cfg    = cfg
+        self.device = _best_device()
+        self.model  = SentenceTransformer(cfg.model_name, device=self.device)
+        print(f"[embedder] {cfg.key} ({cfg.model_name} · {cfg.dimension}-dim · {self.device.upper()})")
 
     def embed(self, text: str) -> List[float]:
         return self.model.encode(text, convert_to_numpy=True).tolist()
@@ -57,13 +61,13 @@ class SentenceTransformerEmbedder:
 
 
 class OllamaEmbedder:
-    """Ollama /api/embeddings backend. CPU-only on Windows AMD GPU."""
+    """Ollama /api/embeddings backend."""
 
     def __init__(self, cfg: EmbedderConfig, base_url: str = OLLAMA_BASE_URL):
         self.cfg      = cfg
         self.base_url = base_url
         self._check_connection()
-        print(f"[embedder] {cfg.key} ({cfg.model_name} · {cfg.dimension}-dim · Ollama)")
+        print(f"[embedder] {cfg.key} ({cfg.model_name} · {cfg.dimension}-dim · Ollama/CPU)")
 
     def _check_connection(self):
         try:
@@ -88,7 +92,7 @@ class OllamaEmbedder:
 
 
 def get_embedder(embedder_key: str = DEFAULT_EMBEDDER):
-    """Return an embedder instance for the given key (minilm | nomic)."""
+    """Return embedder instance for the given key (minilm | nomic)."""
     cfg = get_embedder_config(embedder_key)
     if cfg.backend == "sentence_transformers":
         return SentenceTransformerEmbedder(cfg)
