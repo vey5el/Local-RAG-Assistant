@@ -9,7 +9,22 @@ Interface for both:
   embedder.embed_batch(texts) → List[List[float]]
 """
 
+import os
+import multiprocessing
 import requests
+
+# ── CPU thread optimization ───────────────────────────────────────────────────
+# By default PyTorch / sentence-transformers only uses 1-2 threads.
+# These variables tell OpenBLAS/MKL/OpenMP to use all available cores.
+_N = str(multiprocessing.cpu_count())
+os.environ.setdefault("OMP_NUM_THREADS",        _N)
+os.environ.setdefault("MKL_NUM_THREADS",        _N)
+os.environ.setdefault("OPENBLAS_NUM_THREADS",   _N)
+os.environ.setdefault("VECLIB_MAXIMUM_THREADS", _N)
+os.environ.setdefault("NUMEXPR_NUM_THREADS",    _N)
+
+import torch
+torch.set_num_threads(multiprocessing.cpu_count())
 from typing import List
 from lib.config import OLLAMA_BASE_URL, EmbedderConfig, get_embedder_config, DEFAULT_EMBEDDER
 
@@ -32,7 +47,7 @@ class SentenceTransformerEmbedder:
     def embed(self, text: str) -> List[float]:
         return self.model.encode(text, convert_to_numpy=True).tolist()
 
-    def embed_batch(self, texts: List[str], batch_size: int = 64) -> List[List[float]]:
+    def embed_batch(self, texts: List[str], batch_size: int = 256) -> List[List[float]]:
         return self.model.encode(
             texts,
             batch_size=batch_size,
