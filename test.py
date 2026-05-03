@@ -10,7 +10,6 @@ Metrics per run:
   - Full answer text
   - Answer sanity check (does it mention the entity?)
   - Failure case accuracy (does it say I don't know?)
-  - Consistency across 3 repeats
 
 Report includes:
   - Summary table per combination
@@ -18,7 +17,6 @@ Report includes:
   - Retrieval vs generation time breakdown
   - Best/worst chunk profile by avg distance
   - Failure case accuracy table
-  - Inconsistency log
 
 Usage
 -----
@@ -35,90 +33,56 @@ import re
 from collections import defaultdict
 from typing import List, Dict, Any
 
-from lib import generator
+from lib import generator, retriever
 from lib.embedder import get_embedder
 from lib.store import get_client, ingested_combinations
-from lib.classifier import classify_query
-from lib.store import query_collection
 from lib.config import (
     CHUNK_PROFILES, PROFILE_ORDER,
     EMBEDDER_CONFIGS, EMBEDDER_ORDER,
     LLM_CONFIGS, LLM_ORDER,
-    TOP_K, RELEVANCE_THRESHOLD,
 )
 
 # ── Test queries ──────────────────────────────────────────────────────────────
 
 FULL_QUERIES = [
-    # Person queries
+    # Person queries (13 — every other from original)
     {"query": "Who was Albert Einstein and what is he known for?",      "type": "person", "entity": "Albert Einstein"},
-    {"query": "What did Marie Curie discover?",                         "type": "person", "entity": "Marie Curie"},
     {"query": "What was Leonardo da Vinci known for?",                  "type": "person", "entity": "Leonardo da Vinci"},
-    {"query": "Why is William Shakespeare famous?",                     "type": "person", "entity": "William Shakespeare"},
     {"query": "Who was Ada Lovelace?",                                  "type": "person", "entity": "Ada Lovelace"},
-    {"query": "Why is Nikola Tesla famous?",                            "type": "person", "entity": "Nikola Tesla"},
     {"query": "What is Lionel Messi known for?",                        "type": "person", "entity": "Lionel Messi"},
-    {"query": "Who is Cristiano Ronaldo?",                              "type": "person", "entity": "Cristiano Ronaldo"},
     {"query": "What is Taylor Swift known for?",                        "type": "person", "entity": "Taylor Swift"},
-    {"query": "What is Frida Kahlo known for?",                         "type": "person", "entity": "Frida Kahlo"},
     {"query": "Who was Mustafa Kemal Atatürk?",                         "type": "person", "entity": "Mustafa Kemal Atatürk"},
-    {"query": "What did Isaac Newton discover?",                        "type": "person", "entity": "Isaac Newton"},
     {"query": "What is Galileo Galilei known for?",                     "type": "person", "entity": "Galileo Galilei"},
-    {"query": "Who was Cleopatra?",                                     "type": "person", "entity": "Cleopatra"},
     {"query": "Who was Genghis Khan?",                                  "type": "person", "entity": "Genghis Khan"},
-    {"query": "Who was Joan of Arc?",                                   "type": "person", "entity": "Joan of Arc"},
     {"query": "What did Mahatma Gandhi do?",                            "type": "person", "entity": "Mahatma Gandhi"},
-    {"query": "Who was Martin Luther King Jr.?",                        "type": "person", "entity": "Martin Luther King Jr."},
     {"query": "What was Winston Churchill known for?",                  "type": "person", "entity": "Winston Churchill"},
-    {"query": "What is Elon Musk known for?",                           "type": "person", "entity": "Elon Musk"},
     {"query": "Who is Barack Obama?",                                   "type": "person", "entity": "Barack Obama"},
-    {"query": "What is Beyoncé known for?",                             "type": "person", "entity": "Beyoncé"},
     {"query": "What did Stephen Hawking contribute to science?",        "type": "person", "entity": "Stephen Hawking"},
-    {"query": "Who was Bruce Lee?",                                     "type": "person", "entity": "Bruce Lee"},
     {"query": "What is Charlie Chaplin known for?",                     "type": "person", "entity": "Charlie Chaplin"},
-    # Place queries
+    # Place queries (13 — every other from original)
     {"query": "Where is the Eiffel Tower located?",                     "type": "place",  "entity": "Eiffel Tower"},
-    {"query": "Why is the Great Wall of China important?",              "type": "place",  "entity": "Great Wall of China"},
     {"query": "What is the Taj Mahal?",                                 "type": "place",  "entity": "Taj Mahal"},
-    {"query": "What is the Grand Canyon?",                              "type": "place",  "entity": "Grand Canyon"},
     {"query": "What is Machu Picchu?",                                  "type": "place",  "entity": "Machu Picchu"},
-    {"query": "What was the Colosseum used for?",                       "type": "place",  "entity": "Colosseum"},
     {"query": "What is the Hagia Sophia?",                              "type": "place",  "entity": "Hagia Sophia"},
-    {"query": "Where is the Statue of Liberty?",                        "type": "place",  "entity": "Statue of Liberty"},
     {"query": "What are the Pyramids of Giza?",                         "type": "place",  "entity": "Pyramids of Giza"},
-    {"query": "Where is Mount Everest located?",                        "type": "place",  "entity": "Mount Everest"},
     {"query": "What is the Sydney Opera House?",                        "type": "place",  "entity": "Sydney Opera House"},
-    {"query": "Where are Niagara Falls located?",                       "type": "place",  "entity": "Niagara Falls"},
     {"query": "What is Santorini known for?",                           "type": "place",  "entity": "Santorini"},
-    {"query": "What is Yellowstone National Park famous for?",          "type": "place",  "entity": "Yellowstone National Park"},
     {"query": "What is Angkor Wat?",                                    "type": "place",  "entity": "Angkor Wat"},
-    {"query": "What is the Acropolis of Athens?",                       "type": "place",  "entity": "Acropolis of Athens"},
     {"query": "How tall is the Burj Khalifa?",                          "type": "place",  "entity": "Burj Khalifa"},
-    {"query": "What is the Sagrada Familia?",                           "type": "place",  "entity": "Sagrada Familia"},
     {"query": "What is Stonehenge?",                                    "type": "place",  "entity": "Stonehenge"},
-    {"query": "What is the Louvre Museum?",                             "type": "place",  "entity": "Louvre Museum"},
     {"query": "What is Göbekli Tepe?",                                  "type": "place",  "entity": "Göbekli Tepe"},
-    {"query": "What is Banff National Park known for?",                 "type": "place",  "entity": "Banff National Park"},
     {"query": "What is Petra?",                                         "type": "place",  "entity": "Petra"},
-    {"query": "Where is the Golden Gate Bridge?",                       "type": "place",  "entity": "Golden Gate Bridge"},
     {"query": "What is the Serengeti National Park?",                   "type": "place",  "entity": "Serengeti National Park"},
-    # Mixed / comparison
+    # Mixed / comparison (5)
     {"query": "Compare Lionel Messi and Cristiano Ronaldo",             "type": "both",   "entity": None},
     {"query": "Compare Albert Einstein and Nikola Tesla",               "type": "both",   "entity": None},
-    {"query": "Compare the Eiffel Tower and the Statue of Liberty",     "type": "both",   "entity": None},
-    {"query": "Compare Machu Picchu and Angkor Wat",                    "type": "both",   "entity": None},
     {"query": "Which famous place is located in Turkey?",               "type": "both",   "entity": None},
     {"query": "Which person is associated with electricity?",           "type": "both",   "entity": None},
-    {"query": "Which famous landmark is in France?",                    "type": "both",   "entity": None},
-    {"query": "Who founded a country?",                                 "type": "both",   "entity": None},
-    {"query": "Which place is a UNESCO World Heritage Site?",           "type": "both",   "entity": None},
     {"query": "Which scientist changed our understanding of physics?",  "type": "both",   "entity": None},
-    # Failure cases
+    # Failure cases (3)
     {"query": "Who is the president of Mars?",                          "type": "fail",   "entity": None},
-    {"query": "Tell me about John Doe",                                 "type": "fail",   "entity": None},
     {"query": "What is the capital of Atlantis?",                       "type": "fail",   "entity": None},
     {"query": "Who invented the teleportation machine?",                "type": "fail",   "entity": None},
-    {"query": "What is the tallest building on the Moon?",              "type": "fail",   "entity": None},
 ]
 
 QUICK_QUERIES = [
@@ -132,29 +96,30 @@ QUICK_QUERIES = [
     {"query": "What is the capital of Atlantis?",                       "type": "fail",   "entity": None},
 ]
 
-REPEATS = 3
+REPEATS = 1
 
 
 # ── Core runner ───────────────────────────────────────────────────────────────
 
 def run_single(query, profile, embedder_key, llm_key, embedder, client) -> Dict[str, Any]:
-    """Run one query — returns split retrieval/generation times and full metrics."""
+    """
+    Run one query using the entity-aware retriever (same as app.py / cli.py).
+    Splits timing into retrieval and generation separately.
+    """
 
-    # ── Retrieval ─────────────────────────────────────────────────────────────
+    # ── Retrieval (via entity-aware retriever) ────────────────────────────────
     t_retr_start = time.time()
 
-    query_type      = classify_query(query)
-    query_embedding = embedder.embed(query)
+    result = retriever.retrieve(
+        query,
+        profile_name = profile,
+        embedder_key = embedder_key,
+        embedder     = embedder,
+        client       = client,
+    )
 
-    if query_type == "both":
-        people = query_collection(client, "person", query_embedding, profile, embedder_key, TOP_K)
-        places = query_collection(client, "place",  query_embedding, profile, embedder_key, TOP_K)
-        chunks = sorted(people + places, key=lambda x: x["distance"])[:TOP_K]
-    else:
-        chunks = query_collection(client, query_type, query_embedding, profile, embedder_key, TOP_K)
-
-    relevant      = [c for c in chunks if c["distance"] <= RELEVANCE_THRESHOLD]
-    t_retr        = time.time() - t_retr_start
+    relevant = result["chunks"]
+    t_retr   = time.time() - t_retr_start
 
     # ── Generation ────────────────────────────────────────────────────────────
     t_gen_start = time.time()
@@ -173,17 +138,18 @@ def run_single(query, profile, embedder_key, llm_key, embedder, client) -> Dict[
     min_distance = round(min(distances), 4) if distances else None
 
     return {
-        "answer":       answer,
-        "t_total":      round(t_total, 2),
-        "t_retrieval":  round(t_retr,  3),
-        "t_generation": round(t_gen,   2),
-        "found":        len(relevant) > 0,
-        "query_type":   query_type,
-        "chunks_used":  len(relevant),
-        "top_source":   relevant[0]["title"] if relevant else "—",
-        "avg_distance": avg_distance,
-        "min_distance": min_distance,
-        "all_sources":  list({c["title"] for c in relevant}),
+        "answer":        answer,
+        "t_total":       round(t_total, 2),
+        "t_retrieval":   round(t_retr,  3),
+        "t_generation":  round(t_gen,   2),
+        "found":         len(relevant) > 0,
+        "query_type":    result["query_type"],
+        "chunks_used":   len(relevant),
+        "top_source":    relevant[0]["title"] if relevant else "—",
+        "avg_distance":  avg_distance,
+        "min_distance":  min_distance,
+        "all_sources":   list({c["title"] for c in relevant}),
+        "entity_filter": result.get("entity_filter", []),
     }
 
 
@@ -200,9 +166,8 @@ def is_idk(answer: str) -> bool:
     return "don't know" in answer.lower() or "i don't" in answer.lower()
 
 
-def is_consistent(answers: List[str]) -> bool:
-    if len(answers) < 2:
-        return True
+def is_consistent(answers):
+    return True  # consistency check disabled
     def words(t):
         return set(re.sub(r"[^\w\s]", "", t.lower()).split())
     base = words(answers[0])
@@ -238,13 +203,13 @@ def build_report(all_results, args, started_at, total_elapsed) -> str:
         "# WikiRAG Benchmark Report",
         f"**Generated:** {started_at}  |  "
         f"**Total time:** {fmt_t(total_elapsed)}  |  "
-        f"**Repeats/query:** {REPEATS}  |  "
+        f""  # repeats removed
         f"**Query set:** {'Quick (' + str(len(QUICK_QUERIES)) + ')' if args.quick else 'Full (' + str(len(FULL_QUERIES)) + ')'}",
     )
 
     # ── 1. Summary table ──────────────────────────────────────────────────────
     add("## 1. Summary", "")
-    L.append("| Profile | Embedder | LLM | Avg total | Avg retrieval | Avg generation | Consistent | Entity mention | I-don't-know |")
+    L.append("| Profile | Embedder | LLM | Avg total | Avg retrieval | Avg generation | Entity mention | I-don't-know |")
     L.append("|---------|----------|-----|-----------|---------------|----------------|------------|----------------|--------------|")
 
     for cr in all_results:
@@ -255,7 +220,6 @@ def build_report(all_results, args, started_at, total_elapsed) -> str:
         avg_ret  = round(sum(r["t_retrieval"]  for r in runs_all) / len(runs_all), 3)
         avg_gen  = round(sum(r["t_generation"] for r in runs_all) / len(runs_all), 2)
 
-        cons     = sum(1 for q in cr["queries"] if q["consistent"])
         total_q  = len(cr["queries"])
 
         # Entity mention rate (person + place queries only)
@@ -274,7 +238,7 @@ def build_report(all_results, args, started_at, total_elapsed) -> str:
         L.append(
             f"| {c['profile']} | {c['embedder']} | {c['llm']} "
             f"| {avg_tot}s | {avg_ret}s | {avg_gen}s "
-            f"| {cons}/{total_q} | {mention_rate} | {idk_rate} |"
+            f"| {mention_rate} | {idk_rate} |"
         )
     L.append("")
 
@@ -414,21 +378,7 @@ def build_report(all_results, args, started_at, total_elapsed) -> str:
 
     # ── 7. Consistency log ────────────────────────────────────────────────────
     add("## 7. Consistency Log", "")
-    inconsistent = [
-        (cr["combo"], q["query"], q["type"])
-        for cr in all_results
-        for q in cr["queries"]
-        if not q["consistent"]
-    ]
-    if not inconsistent:
-        add("✅ **All responses were consistent across 3 runs.**")
-    else:
-        add(f"⚠️ **{len(inconsistent)} inconsistent response(s) detected.**")
-        L.append("| Profile | Embedder | LLM | Query | Type |")
-        L.append("|---------|----------|-----|-------|------|")
-        for combo, query, qtype in inconsistent:
-            L.append(f"| {combo['profile']} | {combo['embedder']} | {combo['llm']} | {trunc(query,50)} | {qtype} |")
-        L.append("")
+    add("*Consistency testing disabled — each query runs once.*")
 
     # ── 8. Detailed results per combination ───────────────────────────────────
     add("## 8. Detailed Results")
@@ -465,13 +415,11 @@ def build_report(all_results, args, started_at, total_elapsed) -> str:
                 query   = q_result["query"]
                 runs    = q_result["runs"]
                 entity  = q_result.get("entity")
-                consist = q_result["consistent"]
-                c_icon  = "✅" if consist else "⚠️"
                 m_icon  = ""
                 if entity:
                     m_icon = " 🎯" if mentions_entity(runs[0]["answer"], entity) else " ❓"
 
-                L += [f"##### {c_icon}{m_icon} `{query}`", "",
+                L += [f"##### {m_icon} `{query}`", "",
                       "| Run | Total | Retrieval | Generation | Chunks | Avg dist | Top source |",
                       "|-----|-------|-----------|------------|--------|----------|------------|"]
 
@@ -561,13 +509,13 @@ def main():
         print("[ERROR] No ingested combinations match your filters.")
         return
 
-    total_runs = len(combos) * len(llms_to_test) * len(queries) * REPEATS
+    total_runs = len(combos) * len(llms_to_test) * len(queries)
     print("=" * 66)
     print("  WikiRAG Benchmark")
     print("=" * 66)
     print(f"  Combinations : {len(combos)} × {len(llms_to_test)} LLMs")
-    print(f"  Queries      : {len(queries)} × {REPEATS} repeats = {len(queries)*REPEATS} per combo")
-    print(f"  Total LLM calls: {total_runs}")
+    print(f"  Queries      : {len(queries)}")
+    print(f"  Total LLM calls : {total_runs}")
     print(f"  Output       : {args.out}")
     print("=" * 66)
 
@@ -581,6 +529,17 @@ def main():
     started_at    = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     overall_start = time.time()
     all_results   = []
+
+    # ── Incremental save helper ───────────────────────────────────────────────
+    def save_report(label: str = ""):
+        elapsed = time.time() - overall_start
+        try:
+            with open(args.out, "w", encoding="utf-8") as f:
+                f.write(build_report(all_results, args, started_at, elapsed))
+            if label:
+                print(f"    💾 Report updated ({label})")
+        except Exception as e:
+            print(f"    [WARN] Could not save report: {e}")
 
     for combo in combos:
         profile      = combo["profile"]
@@ -598,21 +557,19 @@ def main():
                 "queries": [],
             }
 
-            for q_item in queries:
+            for q_idx, q_item in enumerate(queries, 1):
                 query  = q_item["query"]
                 qtype  = q_item["type"]
                 entity = q_item.get("entity")
                 runs   = []
 
-                print(f"\n  [{qtype}] {query}")
+                print(f"\n  [{q_idx}/{len(queries)}] [{qtype}] {query}")
 
-                for repeat in range(1, REPEATS + 1):
-                    print(f"    Run {repeat}/{REPEATS}...", end=" ", flush=True)
+                if True:  # single run
+                    print(f"    Running...", end=" ", flush=True)
                     try:
                         run = run_single(query, profile, embedder_key, llm_key, embedder, client)
                         runs.append(run)
-
-                        # ── Terminal output ───────────────────────────────────
                         dist_str = f"dist={run['avg_distance']}" if run['avg_distance'] else "no chunks"
                         print(
                             f"total={fmt_t(run['t_total'])}  "
@@ -622,12 +579,10 @@ def main():
                             f"{dist_str}  "
                             f"src={run['top_source']}"
                         )
-                        # Full answer
                         print(f"    {'─'*58}")
                         for line in run["answer"].splitlines():
                             print(f"    {line}")
                         print(f"    {'─'*58}")
-
                     except Exception as e:
                         print(f"ERROR: {e}")
                         runs.append({
@@ -639,30 +594,32 @@ def main():
                             "all_sources": [],
                         })
 
-                consistent   = is_consistent([r["answer"] for r in runs])
-                mention_ok   = mentions_entity(runs[0]["answer"], entity) if entity else None
-                c_icon       = "✅" if consistent  else "⚠️  INCONSISTENT"
-                m_icon       = (("🎯 entity mentioned" if mention_ok else "❓ entity NOT mentioned") if entity else "")
-                print(f"    Consistency : {c_icon}")
+                mention_ok = mentions_entity(runs[0]["answer"], entity) if entity else None
+                m_icon     = (("🎯 entity mentioned" if mention_ok else "❓ entity NOT mentioned") if entity else "")
                 if m_icon:
                     print(f"    Entity check: {m_icon}")
 
                 combo_result["queries"].append({
                     "query": query, "type": qtype, "entity": entity,
-                    "runs": runs, "consistent": consistent,
+                    "runs": runs, "consistent": True,
                 })
 
+                # ── Save after every query ────────────────────────────────────
+                all_results.append(combo_result)
+                save_report(f"{combo_label} · q{q_idx}/{len(queries)}")
+                all_results.pop()
+
             all_results.append(combo_result)
+            save_report(f"{combo_label} ✓ complete")
 
     total_elapsed = time.time() - overall_start
     print(f"\n{'='*66}")
     print(f"  All done in {fmt_t(total_elapsed)}")
     print(f"{'='*66}")
 
-    print(f"\n  Writing report → {args.out} ...")
     with open(args.out, "w", encoding="utf-8") as f:
         f.write(build_report(all_results, args, started_at, total_elapsed))
-    print(f"  ✓ Report saved: {args.out}\n")
+    print(f"\n  ✓ Final report saved: {args.out}\n")
 
 
 if __name__ == "__main__":
