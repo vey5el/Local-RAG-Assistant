@@ -1,18 +1,38 @@
-# WikiRAG dependencies
+# WikiRAG — Python dependencies
 # Install with: pip install -r requirements.txt
+#
+# After installing, pull Ollama models:
+#   ollama pull llama3.2:3b
+#   ollama pull phi3
+#   ollama pull mistral
+#   ollama pull nomic-embed-text   (only needed for nomic embedder)
 
-# Core
-requests>=2.31.0
+# ── Vector database ───────────────────────────────────────────────
 chromadb>=0.4.24
 
-# UI
-streamlit>=1.32.0
-
-# Ollama Python client (optional, used for model management checks)
-ollama>=0.1.7
-
-# Fallback embedder (only needed if Ollama is unavailable)
+# ── Embedding models ──────────────────────────────────────────────
+# sentence-transformers provides the minilm embedder (no Ollama needed)
 sentence-transformers>=2.6.0
 
-# Utilities
+# PyTorch — CPU version installed by default
+# For NVIDIA GPU (CUDA): pip install torch --index-url https://download.pytorch.org/whl/cu118
+# For AMD GPU on Windows: pip install onnxruntime-directml
+torch>=2.0.0
+
+# ── HTTP / API ────────────────────────────────────────────────────
+# Used for Wikipedia fetch, Ollama API calls
+requests>=2.31.0
+
+# Ollama Python client (used for embedder connection check)
+ollama>=0.1.7
+
+# ── UI ────────────────────────────────────────────────────────────
+streamlit>=1.32.0
+
+# ── Utilities ─────────────────────────────────────────────────────
+# Progress bars for ingestion pipeline
 tqdm>=4.66.0
+
+# Used in merge_reports.py and test.py
+# (included in Python stdlib — no install needed)
+# re, os, threading, datetime, argparse, collections

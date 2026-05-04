@@ -29,6 +29,7 @@ PEOPLE = [
     "Stephen Hawking",
     "Bruce Lee",
     "Charlie Chaplin",
+    "Cahit Arf",
 ]
 
 PLACES = [

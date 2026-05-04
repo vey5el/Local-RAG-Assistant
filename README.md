@@ -1,32 +1,65 @@
 # WikiRAG — Local Wikipedia RAG System
+### BLG483E Project 3
 
-A fully local, ChatGPT-style question-answering system that answers questions about famous people and places using Wikipedia data, a local embedding model, ChromaDB, and a locally-hosted LLM via Ollama.
+A fully local, ChatGPT-style question-answering system that answers questions about famous people and places using Wikipedia data, local embedding models, ChromaDB, and locally-hosted LLMs via Ollama.
 
-> **No external API calls. Runs entirely on your laptop.**
+> **No external API calls. No internet required at query time. Runs entirely on your laptop.**
 
 ---
 
 ## Demo Video
 
-🎥 video link will be added
+🎥 [[Loom link here](https://www.loom.com/share/cddd83540be346779f81c9a1c9f2866e)]
+
+---
+## GitHub Repo
+
+[[GitHub Repo link is here](https://github.com/vey5el/Local-RAG-Assistant)]
 
 ---
 
 ## System Overview
 
 ```
-Wikipedia → SQLite (raw text) → Chunker → ChromaDB (vectors)
-                                                  ↓
-User Query → Classifier → Retriever → Prompt Builder → Ollama LLM → Answer
+Wikipedia API
+     ↓
+SQLite (raw text cache)
+     ↓
+Chunker — 5 configurable profiles (tiny / small / medium / large / xl)
+     ↓
+Embedder — minilm (sentence-transformers) or nomic (Ollama)
+     ↓
+ChromaDB — 10 collection pairs (5 profiles × 2 embedders)
+     ↓
+User Query → Classifier → Entity-Aware Retriever → Prompt Builder
+                                                          ↓
+                                              Ollama LLM (llama3 / phi3 / mistral)
+                                                          ↓
+                                                       Answer
 ```
 
-- **Ingestion:** Fetches Wikipedia articles and stores raw text in SQLite
-- **Chunking:** Splits documents into 500-character chunks with 50-character overlap
-- **Embedding:** Uses `nomic-embed-text` (via Ollama) to embed chunks
-- **Storage:** Two ChromaDB collections — `people` and `places`
-- **Retrieval:** Classifies query, fetches top-5 relevant chunks
-- **Generation:** `llama3.2:3b` generates a grounded answer from retrieved context
-- **UI:** Streamlit web app + CLI fallback
+---
+
+## What Makes This System Special
+
+### Beyond the spec
+The assignment required a basic RAG system. This implementation goes further:
+
+- **5 chunk profiles** — compare tiny vs xl chunks side by side in the same UI
+- **2 embedding models** — minilm (fast, CUDA) and nomic (higher quality, Ollama)
+- **3 LLMs** — switch between llama3, phi3, and mistral instantly without re-ingestion
+- **Entity-aware retrieval** — when a query mentions "Mahatma Gandhi", the retriever filters ChromaDB to Gandhi's chunks *before* similarity ranking, preventing semantic drift
+- **Comprehensive benchmark** — 1,950 LLM calls across all 30 combinations, full timing and quality analysis
+
+---
+
+## Selectable Options
+
+| Dimension | Options | Needs re-ingestion? |
+|-----------|---------|-------------------|
+| **Chunk profile** | tiny / small / medium / large / xl | ✅ Yes |
+| **Embedding model** | minilm / nomic | ✅ Yes |
+| **LLM** | llama3 / phi3 / mistral | ❌ No — switch instantly |
 
 ---
 
@@ -34,8 +67,7 @@ User Query → Classifier → Retriever → Prompt Builder → Ollama LLM → An
 
 - Python 3.10+
 - [Ollama](https://ollama.com) installed and running
-- ~8 GB free disk space (models + vector DB)
-
+- ~8 GB free disk space (models + vectors)
 ---
 
 ## Installation
@@ -43,15 +75,15 @@ User Query → Classifier → Retriever → Prompt Builder → Ollama LLM → An
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/vey5el/Local-RAG-Assistant
-cd Local-RAG-Assistant
+git clone https://github.com/YOUR_USERNAME/wikirag.git
+cd wikirag
 ```
 
 ### 2. Create a virtual environment
 
 ```bash
 python -m venv venv
-source venv/bin/activate        # macOS/Linux
+source venv/bin/activate        # macOS / Linux
 venv\Scripts\activate           # Windows
 ```
 
@@ -61,17 +93,22 @@ venv\Scripts\activate           # Windows
 pip install -r requirements.txt
 ```
 
-### 4. Pull required Ollama models
+### 4. Pull Ollama models
 
 ```bash
-# Pull the language model
-ollama pull llama3.2:3b
+# Start Ollama
+ollama serve
 
-# Pull the embedding model
+# Pull LLMs (pull at least llama3.2:3b)
+ollama pull llama3.2:3b
+ollama pull phi3
+ollama pull mistral
+
+# Pull embedding model (only needed for nomic embedder)
 ollama pull nomic-embed-text
 ```
 
-Verify Ollama is running:
+Verify:
 ```bash
 ollama list
 ```
@@ -80,39 +117,58 @@ ollama list
 
 ## Ingest Data
 
-This fetches Wikipedia articles for all 40+ entities and stores them in SQLite, then chunks and embeds them into ChromaDB.
+Ingestion fetches Wikipedia articles → chunks them → embeds them → stores in ChromaDB.
+Raw article text is cached in SQLite — re-ingesting different profiles/embedders skips the network.
+- You can also download preprocessed data from my [drive](https://drive.google.com/file/d/1mTtLt9B8xY3JUTDtiAHjrvVVe-NO7nTS/view?usp=sharing) which can save you couple of minutes to hours. Just extract it the project folder.
 
+
+
+### Quickstart — default profile (medium) + default embedder (minilm)
 ```bash
 python ingest.py
 ```
 
-You will see progress output as each article is fetched, chunked, and embedded.
-
-> **Note:** Ingestion is idempotent — safe to re-run without duplicating data.
-
-Expected output:
+### Ingest all 10 combinations (recommended)
+```bash
+python ingest.py --all
 ```
-[✓] Fetched: Albert Einstein (person)
-[✓] Fetched: Marie Curie (person)
-...
-[✓] Embedded 847 chunks into 'people' collection
-[✓] Embedded 634 chunks into 'places' collection
-Ingestion complete.
+
+### Ingest specific combinations
+```bash
+python ingest.py --all --embedder minilm       # all 5 profiles, minilm only (fast)
+python ingest.py --all --embedder nomic        # all 5 profiles, nomic (slower)
+python ingest.py --profile large --embedder minilm
+```
+
+### Parallel ingestion (faster on multi-core machines)
+```bash
+python parallel_ingest.py                      # all 10 combos in parallel
+python parallel_ingest.py --embedder minilm    # 5 threads, minilm only
+```
+
+### Check ingestion status
+```bash
+python ingest.py --list
+```
+
+### Reset and re-ingest
+```bash
+python ingest.py --profile medium --embedder minilm --reset
 ```
 
 ---
 
 ## Start the Application
 
-### Option A — Streamlit Web UI (recommended)
+### Streamlit Web UI (recommended)
 
 ```bash
 streamlit run app.py
 ```
 
-Open your browser at `http://localhost:8501`
+Open: `http://localhost:8501`
 
-### Option B — Command Line Interface
+### Command Line Interface
 
 ```bash
 python cli.py
@@ -120,23 +176,49 @@ python cli.py
 
 ---
 
-## Usage
+## Streamlit UI Guide
 
-### Streamlit UI
+The sidebar has three independent selectors:
 
-1. Type your question in the chat input box
-2. Press Enter to submit
-3. Toggle **"Show source chunks"** in the sidebar to see retrieved context
-4. Click **"Clear conversation"** in the sidebar to reset
+**🗂 Chunk Profile** — how documents were split
+| Profile | Chunk size | Overlap | Best for |
+|---------|-----------|---------|---------|
+| tiny | 150 chars | 15 | Very precise fact lookup |
+| small | 300 chars | 30 | Precise retrieval |
+| medium | 500 chars | 50 | Balanced — default |
+| large | 1000 chars | 100 | Rich context answers |
+| xl | 2000 chars | 200 | Comparison questions |
 
-### CLI
+**🧠 Embedding Model** — how text was vectorized
+- `minilm` — paraphrase-MiniLM-L3-v2, 384-dim, fast, CUDA-compatible
+- `nomic` — nomic-embed-text, 768-dim, higher quality via Ollama
+
+**🤖 Language Model** — which LLM generates the answer
+- `llama3` — llama3.2:3b, fastest, excellent quality
+- `phi3` — Microsoft Phi-3, compact and efficient
+- `mistral` — Mistral 7B, most detailed answers
+
+> Switching profile or embedder clears the chat — they use different ChromaDB collections.
+> Switching LLM works instantly mid-conversation.
+
+Toggle **"Show source chunks"** to see which Wikipedia passages were used.
+
+---
+
+## CLI Guide
 
 ```
-WikiRAG > Who was Albert Einstein?
-WikiRAG > What is the Eiffel Tower?
-WikiRAG > Compare Lionel Messi and Cristiano Ronaldo
-WikiRAG > quit
+WikiRAG [medium/minilm/llama3] > Who was Albert Einstein?
+WikiRAG [medium/minilm/llama3] > profile large
+WikiRAG [large/minilm/llama3]  > embedder nomic
+WikiRAG [large/nomic/llama3]   > llm mistral
+WikiRAG [large/nomic/mistral]  > Compare the Eiffel Tower and the Statue of Liberty
+WikiRAG [large/nomic/mistral]  > sources on
+WikiRAG [large/nomic/mistral]  > status
+WikiRAG [large/nomic/mistral]  > quit
 ```
+
+Available commands: `profile <name>`, `embedder <name>`, `llm <name>`, `status`, `sources on/off`, `clear`, `help`, `quit`
 
 ---
 
@@ -149,6 +231,8 @@ What did Marie Curie discover?
 Why is Nikola Tesla famous?
 Compare Lionel Messi and Cristiano Ronaldo
 What is Frida Kahlo known for?
+Who was Mustafa Kemal Atatürk?
+What did Stephen Hawking contribute to science?
 ```
 
 ### Places
@@ -158,14 +242,17 @@ Why is the Great Wall of China important?
 What was the Colosseum used for?
 Where is Mount Everest?
 What is Machu Picchu?
+What is the Hagia Sophia?
+What is Göbekli Tepe?
 ```
 
-### Mixed
+### Mixed / Comparison
 ```
 Which famous place is located in Turkey?
 Which person is associated with electricity?
 Compare the Eiffel Tower and the Statue of Liberty
 Compare Albert Einstein and Nikola Tesla
+Who founded a country?
 ```
 
 ### Expected Failures (I don't know)
@@ -181,81 +268,71 @@ What is the capital of Atlantis?
 
 ```
 wikirag/
-├── app.py                  # Streamlit web UI
-├── cli.py                  # Command-line interface
-├── ingest.py               # Main ingestion entry point
-│
-├── wikirag/
-│   ├── __init__.py
-│   ├── config.py           # Constants and configuration
-│   ├── fetcher.py          # Wikipedia API fetcher
-│   ├── chunker.py          # Text chunking logic
-│   ├── embedder.py         # Embedding via Ollama / sentence-transformers
-│   ├── store.py            # ChromaDB operations
-│   ├── database.py         # SQLite operations
-│   ├── classifier.py       # Query classification (person/place/both)
-│   ├── retriever.py        # Vector similarity retrieval
-│   └── generator.py        # LLM answer generation via Ollama
-│
-├── data/
-│   ├── entities.py         # List of all people and places to ingest
-│   └── wikirag.db          # SQLite database (created at runtime)
-│
-├── chroma_db/              # ChromaDB persistent storage (created at runtime)
-│
+├── app.py                   # Streamlit web UI (3 live selectors)
+├── cli.py                   # Command-line interface
+├── ingest.py                # Sequential ingestion pipeline
+├── parallel_ingest.py       # Threaded parallel ingestion
+├── test.py                  # Benchmark suite (65 queries × 30 combos)
+├── merge_reports.py         # Merges individual reports into master
 ├── requirements.txt
 ├── README.md
 ├── product_prd.md
-└── recommendation.md
+├── recommendation.md
+│
+├── lib/
+│   ├── config.py            # Chunk profiles, embedders, LLMs
+│   ├── fetcher.py           # Wikipedia REST API fetcher with retry
+│   ├── chunker.py           # Fixed-size chunking with overlap
+│   ├── embedder.py          # sentence-transformers + Ollama backends
+│   ├── store.py             # ChromaDB read/write operations
+│   ├── database.py          # SQLite article cache
+│   ├── classifier.py        # Rule-based query classification
+│   ├── retriever.py         # Entity-aware vector retrieval
+│   └── generator.py         # Ollama LLM prompt + generation
+│
+├── data/
+│   ├── entities.py          # 25 people + 25 places
+│   └── wikirag.db           # SQLite database (created at runtime)
+│
+├── chroma_db/               # ChromaDB storage (created at runtime)
+└── .streamlit/
+    └── config.toml          # Suppresses watcher warnings
 ```
 
 ---
 
 ## Configuration
 
-Edit `wikirag/config.py` to adjust:
+Edit `lib/config.py` to tune:
 
 ```python
-CHUNK_SIZE = 500          # Characters per chunk
-CHUNK_OVERLAP = 50        # Overlap between chunks
-TOP_K = 5                 # Number of chunks to retrieve
-RELEVANCE_THRESHOLD = 1.2 # Cosine distance above which to return "I don't know"
-OLLAMA_MODEL = "llama3.2:3b"
-EMBED_MODEL = "nomic-embed-text"
+TOP_K               = 5      # chunks retrieved per query
+RELEVANCE_THRESHOLD = 1.5    # cosine distance cutoff
+OLLAMA_MODEL        = "llama3.2:3b"
 ```
 
 ---
 
-## Requirements
+## GPU Acceleration
 
+### NVIDIA GPU (CUDA)
+```bash
+pip uninstall torch -y
+pip install torch --index-url https://download.pytorch.org/whl/cu118
 ```
-chromadb>=0.4.0
-requests>=2.31.0
-streamlit>=1.32.0
-ollama>=0.1.7
-```
+sentence-transformers detects CUDA automatically — 10–20x faster ingestion.
 
-See `requirements.txt` for pinned versions.
+
 
 ---
 
 ## Troubleshooting
 
-**Ollama not found / connection refused**
-```bash
-ollama serve   # Start Ollama if it's not running
-```
-
-**ChromaDB version conflicts**
-```bash
-pip install chromadb==0.4.24
-```
-
-**Slow ingestion**
-- Embedding 40+ articles with nomic-embed-text takes 5–15 minutes on CPU
-- You can reduce the entity list in `data/entities.py` for faster testing
-
-**Model not responding**
-```bash
-ollama pull llama3.2:3b   # Re-pull if model seems missing
-```
+| Problem | Fix |
+|---------|-----|
+| `ollama: command not found` | Install from https://ollama.com |
+| Connection refused on port 11434 | Run `ollama serve` |
+| ChromaDB version error | `pip install chromadb==0.4.24` |
+| Ingestion frozen on nomic | It's working — nomic embeds one chunk at a time. A per-chunk bar shows progress |
+| Low CPU during minilm | Normal on 2-core machines — use NVIDIA GPU for real speedup |
+| Wrong entity returned (src mismatch) | Entity-aware retriever filters by name — ensure entity is in `data/entities.py` |
